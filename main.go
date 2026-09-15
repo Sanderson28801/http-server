@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var valid_methods = []string{"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE"}
@@ -45,17 +48,36 @@ func handleConnection(conn net.Conn) {
 	delim := []byte("\r\n\r\n")
 	var index int
 	for {
+		err := conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if err != nil {
+			log.Println("Error setting deadling: ", err)
+		}
+
 		n, err := conn.Read(buffer)
 
 		if err != nil {
 			if err == io.EOF {
 				fmt.Println("Client closed connection")
+			} else if errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Println("Connection timed out due to inactivity")
+
 			} else {
 				log.Println("Read Error: ", err)
 			}
 			return
 		}
 		active_buffer = append(active_buffer, buffer[:n]...)
+
+		// Make sure the user isn't sending massive packets
+		if len(active_buffer) > 8000 {
+			httpError := "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n"
+			_, err := conn.Write([]byte(httpError))
+
+			if err != nil {
+				log.Println("Write Error: ", err)
+			}
+			return
+		}
 		index = bytes.Index(active_buffer, delim)
 		if index != -1 {
 			break
@@ -67,19 +89,20 @@ func handleConnection(conn net.Conn) {
 	fields := strings.Split(string(request_data), "\r\n")
 
 	request_line := strings.Split(fields[0], " ")
-	// fmt.Println(requst)
+
 	bad_request := false
 	if len(request_line) == 3 && slices.Contains(valid_methods, request_line[0]) && len(request_line[1]) > 0 && slices.Contains(valid_protocol_versions, request_line[2]) {
 		method := request_line[0]
 		target := request_line[1]
 		header_map := make(map[string]string)
-		// fmt.Println(fields)
+
 		if len(fields) > 1 {
 			for _, header := range fields[1:] {
-				// fmt.Println(header)
+				if header == "" {
+					continue
+				}
 				key, value, found := strings.Cut(header, ":")
-				// fmt.Println(header)
-				// fmt.Println(found)
+
 				if !found {
 					bad_request = true
 					break
